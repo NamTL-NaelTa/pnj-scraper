@@ -8,15 +8,15 @@ from curl_cffi import requests
 from datetime import datetime
 import io
 
-# --- 1. THIẾT LẬP TRANG ---
+# Cấu hình trang
 st.set_page_config(page_title="PNJ Lab Data Scraper", page_icon="💎", layout="centered")
 st.title("💎 Hệ thống cào dữ liệu PNJ Lab")
 
-# --- 2. CÁC HÀM TIỆN ÍCH (Giữ nguyên logic cũ) ---
 def parse_measurement(meas_str):
     if not meas_str: return "", "", ""
     cleaned = meas_str.lower().replace("mm", "").replace("x", " ").replace("-", " ")
-    parts = [p for p in cleaned.split() if p.replace(".", "", 1).isdigit()]
+    # Bổ sung tính năng nhận diện dấu phẩy (,) nếu web có format "4,50"
+    parts = [p for p in cleaned.split() if p.replace(",", ".").replace(".", "", 1).isdigit()]
     return (parts[0] if len(parts) > 0 else "", 
             parts[1] if len(parts) > 1 else "", 
             parts[2] if len(parts) > 2 else "")
@@ -24,10 +24,13 @@ def parse_measurement(meas_str):
 def get_p_span_value(soup, keyword, exclude=None):
     for p in soup.find_all("p"):
         clean_text = " ".join(p.text.split()).upper()
-        if exclude and exclude.upper() in clean_text: continue
+        if exclude and exclude.upper() in clean_text: 
+            continue
         if keyword.upper() in clean_text:
             span = p.find("span")
-            return span.text.strip() if span else ""
+            # Sửa lại logic chuẩn: Chỉ dừng lại trả kết quả khi có thẻ span thật sự
+            if span and span.text.strip():
+                return span.text.strip()
     return ""
 
 def get_table_dict(soup):
@@ -148,7 +151,6 @@ def scrape_pnj_item(session, pnj_code, prod_type, max_retries=1):
 
     return row_data
 
-# --- 3. GIAO DIỆN TƯƠNG TÁC ---
 st.markdown("### 1. Tải lên danh sách")
 uploaded_file = st.file_uploader("Kéo thả file Excel (.xlsx)", type=["xlsx", "xls"])
 
@@ -163,7 +165,6 @@ if uploaded_file is not None:
         pass_count = 1
         session = requests.Session()
         
-        # Thiết lập các vùng chứa (containers) để cập nhật UI mượt mà
         status_text = st.empty()
         log_box = st.empty()
         progress_bar = st.progress(0)
@@ -181,7 +182,7 @@ if uploaded_file is not None:
                 prod_type = row["Loại sản phẩm"]
                 
                 logs.append(f"🔄 Đang cào: {pnj_code} ({prod_type})...")
-                log_box.text("\n".join(logs[-6:])) # Hiển thị 6 dòng log gần nhất
+                log_box.text("\n".join(logs[-6:]))
 
                 item_data = scrape_pnj_item(session, pnj_code, prod_type, max_retries=1)
 
@@ -209,7 +210,6 @@ if uploaded_file is not None:
 
         st.success("🎉 Hoàn tất 100%!")
         
-        # Ghi dữ liệu vào RAM và cấu hình format Excel
         df_result = pd.DataFrame(results)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -219,7 +219,6 @@ if uploaded_file is not None:
                 max_len = max((len(str(cell.value)) for cell in col if cell.value is not None), default=0)
                 worksheet.column_dimensions[col[0].column_letter].width = max(max_len + 4, 12)
         
-        # Trả về file cho trình duyệt
         st.download_button(
             label="⬇️ Tải file kết quả (Excel)",
             data=output.getvalue(),
