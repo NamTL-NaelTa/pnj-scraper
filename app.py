@@ -15,8 +15,7 @@ st.title("💎 Hệ thống cào dữ liệu PNJ Lab")
 def parse_measurement(meas_str):
     if not meas_str: return "", "", ""
     cleaned = meas_str.lower().replace("mm", "").replace("x", " ").replace("-", " ")
-    # Bổ sung tính năng nhận diện dấu phẩy (,) nếu web có format "4,50"
-    parts = [p for p in cleaned.split() if p.replace(",", ".").replace(".", "", 1).isdigit()]
+    parts = [p for p in cleaned.split() if p.replace(".", "", 1).isdigit()]
     return (parts[0] if len(parts) > 0 else "", 
             parts[1] if len(parts) > 1 else "", 
             parts[2] if len(parts) > 2 else "")
@@ -24,12 +23,11 @@ def parse_measurement(meas_str):
 def get_p_span_value(soup, keyword, exclude=None):
     for p in soup.find_all("p"):
         clean_text = " ".join(p.text.split()).upper()
-        if exclude and exclude.upper() in clean_text: 
+        if exclude and exclude.upper() in clean_text:
             continue
         if keyword.upper() in clean_text:
             span = p.find("span")
-            # Sửa lại logic chuẩn: Chỉ dừng lại trả kết quả khi có thẻ span thật sự
-            if span and span.text.strip():
+            if span:
                 return span.text.strip()
     return ""
 
@@ -58,8 +56,14 @@ def get_table_comments(soup):
         if "COMMENTS" in clean_text or "CHÚ THÍCH" in clean_text:
             span_xanh = td.find("span", class_="xanh")
             if span_xanh and span_xanh.text.strip(): return span_xanh.text.strip()
-            text_parts = [elem.text.strip() if hasattr(elem, "text") else elem.strip() 
-                          for elem in td.children if elem.name != "strong"]
+            text_parts = []
+            for elem in td.children:
+                if elem.name == "strong":
+                    continue
+                if hasattr(elem, "text"):
+                    text_parts.append(elem.text.strip())
+                elif isinstance(elem, str):
+                    text_parts.append(elem.strip())
             return " ".join(filter(None, text_parts)).strip()
     return ""
 
@@ -80,19 +84,25 @@ def scrape_pnj_item(session, pnj_code, prod_type, max_retries=1):
     else: return "SKIP"
 
     url = f"https://pnjlab.com.vn/product-result/?ProductID={pnj_code}&type={type_code}"
+    soup = None
 
     for _ in range(max_retries):
         try:
             response = session.get(url, impersonate="chrome120", timeout=15)
             if response.status_code == 200:
+                # Phát hiện trang xác minh Cloudflare bị làm mờ (không có dữ liệu)
+                if "Just a moment..." in response.text or "Cloudflare" in response.text:
+                    return "BLOCKED"
                 soup = BeautifulSoup(response.text, "html.parser")
                 break
             elif response.status_code == 404: return "SKIP"
-            elif response.status_code == 403: return None
+            elif response.status_code == 403: return "BLOCKED"
             else: return None
         except Exception:
             return None
     else: return None
+
+    if not soup: return None
 
     row_data = {
         "Mã PNJ": pnj_code, "Loại sản phẩm": prod_type, "Tên đá/ Loại ngọc": "",
@@ -104,8 +114,10 @@ def scrape_pnj_item(session, pnj_code, prod_type, max_retries=1):
 
     if type_code == 1:
         row_data["Tên đá/ Loại ngọc"] = "Diamond"
-        row_data["Weight (carat)"] = (get_p_span_value(soup, "CARAT WEIGHT") or get_p_span_value(soup, "carat")).lower().replace("carat", "").replace("cts", "").strip()
-        s1, s2, s3 = parse_measurement(get_p_span_value(soup, "Measurement", exclude="MARGIN"))
+        carat_raw = get_p_span_value(soup, "CARAT WEIGHT") or get_p_span_value(soup, "carat")
+        row_data["Weight (carat)"] = carat_raw.lower().replace("carat", "").replace("cts", "").strip()
+        meas_raw = get_p_span_value(soup, "Measurement", exclude="MARGIN")
+        s1, s2, s3 = parse_measurement(meas_raw)
         row_data["size_1"], row_data["size_2"], row_data["size_3"] = s1, s2, s3
         row_data["Màu sắc(Color)"] = get_p_span_value(soup, "COLOR GRADE")
         row_data["Cut Grade"] = get_p_span_value(soup, "CUT GRADE")
@@ -126,8 +138,10 @@ def scrape_pnj_item(session, pnj_code, prod_type, max_retries=1):
 
     elif type_code in [2, 3, 4]:
         td_dict = get_table_dict(soup)
-        row_data["Weight (carat)"] = find_in_dict(td_dict, "WEIGHT", "KHỐI LƯỢNG").lower().replace("cts", "").replace("carat", "").strip()
-        s1, s2, s3 = parse_measurement(find_in_dict(td_dict, "MEASUREMENT", "KÍCH THƯỚC"))
+        raw_w = find_in_dict(td_dict, "WEIGHT", "KHỐI LƯỢNG")
+        row_data["Weight (carat)"] = raw_w.lower().replace("cts", "").replace("carat", "").strip()
+        raw_m = find_in_dict(td_dict, "MEASUREMENT", "KÍCH THƯỚC")
+        s1, s2, s3 = parse_measurement(raw_m)
         row_data["size_1"], row_data["size_2"], row_data["size_3"] = s1, s2, s3
         row_data["Màu sắc(Color)"] = find_in_dict(td_dict, "COLOR", "MÀU SẮC")
         row_data["Chú thích"] = get_table_comments(soup)
@@ -148,6 +162,10 @@ def scrape_pnj_item(session, pnj_code, prod_type, max_retries=1):
             row_data["Shape & Cut"] = find_in_dict(td_dict, "SHARP", "SHAPE", "HÌNH DẠNG")
             row_data["Polish/Luster"] = find_in_dict(td_dict, "LUSTER", "ĐỘ BÓNG")
             row_data["Symmetry/Surface"] = find_in_dict(td_dict, "SURFACE", "BỀ MẶT")
+
+    # Kiểm tra chốt chặn: Nếu cào xong mà 3 cột trọng yếu đều trống, chứng tỏ web đã chặn hiển thị dữ liệu
+    if not row_data["Weight (carat)"] and not row_data["size_1"] and not row_data["Màu sắc(Color)"]:
+        return "BLOCKED"
 
     return row_data
 
@@ -173,8 +191,9 @@ if uploaded_file is not None:
         items_processed = 0
         logs = []
 
-        while len(queue) > 0:
-            status_text.markdown(f"**Vòng lặp {pass_count} | Còn lại: {len(queue)} mã**")
+        # Chỉ lặp tối đa 3 vòng để tránh treo máy chủ nếu bị PNJ chặn vĩnh viễn
+        while len(queue) > 0 and pass_count <= 3:
+            status_text.markdown(f"**Vòng lặp {pass_count}/3 | Còn lại: {len(queue)} mã**")
             failed_queue = []
 
             for row in queue:
@@ -189,12 +208,15 @@ if uploaded_file is not None:
                 if item_data == "SKIP":
                     logs[-1] = f"⏭️ Bỏ qua (Lỗi 404/Sai loại): {pnj_code}"
                     items_processed += 1
+                elif item_data == "BLOCKED":
+                    logs[-1] = f"🚨 Bị tường lửa chặn, chờ chạy lại: {pnj_code}"
+                    failed_queue.append(row)
                 elif item_data:
                     logs[-1] = f"✅ Lấy thành công: {pnj_code}"
                     results.append(item_data)
                     items_processed += 1
                 else:
-                    logs[-1] = f"⏳ Bị chặn/Lỗi mạng (Chờ duyệt lại): {pnj_code}"
+                    logs[-1] = f"⏳ Lỗi mạng (Chờ duyệt lại): {pnj_code}"
                     failed_queue.append(row)
 
                 log_box.text("\n".join(logs[-6:]))
@@ -203,25 +225,30 @@ if uploaded_file is not None:
 
             queue = failed_queue
             if len(queue) > 0:
-                logs.append(f"💤 Tạm nghỉ 10s trước khi cào lại {len(queue)} mã lỗi...")
+                if pass_count >= 3:
+                    st.error("⚠️ Máy chủ Streamlit đã bị hệ thống PNJ chặn hàng loạt do tính năng bảo vệ Cloudflare. Quá trình tự động dừng để bảo vệ an toàn. Để cào danh sách lớn, vui lòng chạy app này trực tiếp trên máy tính nội bộ của bạn (Localhost) thay vì dùng link web.")
+                    break
+                logs.append(f"💤 Tạm nghỉ 5s trước khi cào lại {len(queue)} mã lỗi...")
                 log_box.text("\n".join(logs[-6:]))
-                time.sleep(10)
+                time.sleep(5)
                 pass_count += 1
 
-        st.success("🎉 Hoàn tất 100%!")
-        
-        df_result = pd.DataFrame(results)
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df_result.to_excel(writer, index=False, sheet_name="Data_PNJ")
-            worksheet = writer.sheets["Data_PNJ"]
-            for col in worksheet.columns:
-                max_len = max((len(str(cell.value)) for cell in col if cell.value is not None), default=0)
-                worksheet.column_dimensions[col[0].column_letter].width = max(max_len + 4, 12)
-        
-        st.download_button(
-            label="⬇️ Tải file kết quả (Excel)",
-            data=output.getvalue(),
-            file_name=f"KetQua_PNJ_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        if results:
+            st.success("🎉 Đã hoàn tất phiên làm việc!")
+            df_result = pd.DataFrame(results)
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                df_result.to_excel(writer, index=False, sheet_name="Data_PNJ")
+                worksheet = writer.sheets["Data_PNJ"]
+                for col in worksheet.columns:
+                    max_len = max((len(str(cell.value)) for cell in col if cell.value is not None), default=0)
+                    worksheet.column_dimensions[col[0].column_letter].width = max(max_len + 4, 12)
+            
+            st.download_button(
+                label="⬇️ Tải file kết quả (Excel)",
+                data=output.getvalue(),
+                file_name=f"KetQua_PNJ_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        else:
+            st.warning("Không có dữ liệu nào được thu thập thành công trong phiên này.")
